@@ -36,6 +36,8 @@ class AgentState:
     last_code_executed: Optional[str] = None
     last_prompt_id: str = None
     last_prompt_used: str = None
+    last_query: Optional[str] = None
+    last_result: Any = None
     output_type: Optional[str] = None
 
     def __post_init__(self):

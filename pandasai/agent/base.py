@@ -3,7 +3,7 @@ import warnings
 from typing import Any, List, Optional, Union
 
 import pandas as pd
-
+from pandasai.helpers.sql_history import SQLHistoryLogger
 from pandasai.core.code_execution.code_executor import CodeExecutor
 from pandasai.core.code_generation.base import CodeGenerator
 from pandasai.core.prompts import (
@@ -112,12 +112,13 @@ class Agent:
         """Generate code using the LLM."""
 
         self._state.memory.add(str(query), is_user=True)
+        self._state.last_query = str(query)
 
         self._state.logger.log("Generating new code...")
         prompt = get_chat_prompt_for_sql(self._state)
 
         code = self._code_generator.generate_code(prompt)
-        self._state.last_prompt_used = prompt
+        self._state.last_prompt_used = prompt.to_string()
         return code
 
     def execute_code(self, code: str) -> dict:
@@ -196,24 +197,69 @@ class Agent:
 
     def execute_with_retries(self, code: str) -> Any:
         """Execute the code with retry logic."""
+
         max_retries = self._state.config.max_retries
         attempts = 0
 
         while attempts <= max_retries:
             try:
+                # Execute generated Python code.
                 result = self.execute_code(code)
-                return self._response_parser.parse(result, code)
+
+                # Convert the raw execution result into the
+                # final PandasAI response.
+                parsed_result = self._response_parser.parse(
+                    result,
+                    code,
+                )
+
+                # Store the latest generated code.
+                self._state.last_code_generated = code
+
+                # Record the REAL successful runtime execution.
+                SQLHistoryLogger.record(
+                    query=self._state.memory.last()["message"],
+                    prompt=self._state.last_prompt_used,
+                    generated_python=code,
+                    status="success",
+                    engine="duckdb",
+                    result=parsed_result,
+                    llm=self._state.config.llm,
+                )
+
+                return parsed_result
+
             except Exception as e:
                 attempts += 1
+
                 if attempts > max_retries:
-                    self._state.logger.log(f"Max retries reached. Error: {e}")
+                    self._state.logger.log(
+                        f"Max retries reached. Error: {e}"
+                    )
+
+                    # Record failed execution.
+                    SQLHistoryLogger.record(
+                        query=self._state.memory.last()["message"],
+                        prompt=self._state.last_prompt_used,
+                        generated_python=code,
+                        status="failed",
+                        engine="duckdb",
+                        error=str(e),
+                        llm=self._state.config.llm,
+                    )
+
                     raise
+
                 self._state.logger.log(
                     f"Retrying execution ({attempts}/{max_retries})..."
                 )
-                code = self._regenerate_code_after_error(code, e)
 
-        return None
+                code = self._regenerate_code_after_error(
+                    code,
+                    e,
+                )
+
+        return None    
 
     def train(
         self,
